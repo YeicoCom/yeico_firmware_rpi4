@@ -108,3 +108,4 @@ index 5cf70d548e29b8..e4000d2f148d43 100644
  }
  
  struct drm_plane * drm_plane_from_index(struct drm_device *dev, int idx);
+ 
