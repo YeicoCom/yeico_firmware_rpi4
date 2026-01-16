@@ -8,12 +8,11 @@ and then also in builder cloned, built, and installed cog as follows
 # on builder
 mkdir code
 cd code
-git clone https://github.com/Igalia/cog.git
+git clone -b yeico git@github.com:YeicoCom/cog.git
 cd cog
-git checkout c4625676a21308e7c82175f1ce9a6c8849f22800
 sudo apt install -y libwpewebkit-1.1-dev libmanette-0.2-dev libwpebackend-fdo-1.0-dev libinput-dev weston
 meson setup build
-time ninja -C build -j 4 2> /tmp/build.log
+time ninja -C build -j 4 2> /tmp/cog-build.log
 sudo ninja -C build install
 
 ninja: Entering directory `build'
@@ -46,6 +45,10 @@ rm -fr /tmp/weston-runtime-dir
 mkdir -p /tmp/weston-runtime-dir
 export XDG_RUNTIME_DIR=/tmp/weston-runtime-dir
 weston # shows up on p3420
+
+rm -fr /tmp/weston-runtime-dir
+mkdir -p /tmp/weston-runtime-dir
+export XDG_RUNTIME_DIR=/tmp/weston-runtime-dir
 weston --shell=kiosk-shell.so # cog won't maximize window, resize weston before launching cog
 
 export XDG_RUNTIME_DIR=/tmp/weston-runtime-dir
