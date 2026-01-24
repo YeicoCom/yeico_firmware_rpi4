@@ -19,8 +19,9 @@ case "$1" in
         package=${array[1]}
         version=${array[2]}
         dir=build/$package-$version
-	[ -d $dir ] || echo $dir not found
-	[ -d $dir ] || continue
+        [ -d $dir ] || make $package-patch
+        [ -d $dir ] || echo $dir not found
+        [ -d $dir ] || continue
         [ -f $dir/.yeico_patched ] || echo $dir
         [ -f $dir/.yeico_patched ] || (cd build/$package-$version && (patch -p1 < $p))
         [ -f $dir/.yeico_patched ] || make $package-rebuild
