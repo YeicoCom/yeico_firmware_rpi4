@@ -19,11 +19,13 @@ case "$1" in
         package=${array[1]}
         version=${array[2]}
         dir=build/$package-$version
+	[ -d $dir ] || echo $dir not found
+	[ -d $dir ] || continue
         [ -f $dir/.yeico_patched ] || echo $dir
         [ -f $dir/.yeico_patched ] || (cd build/$package-$version && (patch -p1 < $p))
         [ -f $dir/.yeico_patched ] || make $package-rebuild
         [ -f $dir/.yeico_patched ] || counter=$((counter + 1))
-	[ -f $dir/.yeico_patched ] || touch $dir/.yeico_patched
+        [ -f $dir/.yeico_patched ] || touch $dir/.yeico_patched
     done
     echo Total patched: $counter
     [ $counter -gt 0 ] && make

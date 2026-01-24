@@ -1,0 +1,1870 @@
+diff -ruN linux-patched/drivers/gpu/drm/panel/Kconfig linux-custom/drivers/gpu/drm/panel/Kconfig
+--- linux-patched/drivers/gpu/drm/panel/Kconfig	2026-01-23 23:47:49.963959739 -0600
++++ linux-custom/drivers/gpu/drm/panel/Kconfig	2026-01-24 01:05:12.233721941 -0600
+@@ -867,4 +867,16 @@
+ 	  Say Y here if you want to enable support for the Xinpeng
+ 	  XPP055C272 controller for 720x1280 LCD panels with MIPI/RGB/SPI
+ 	  system interfaces.
++
++config DRM_PANEL_RETERMINAL
++	tristate "reTerminal Touch Panel driver"
++	depends on ARM64
++	depends on I2C
++	depends on I2C_CHARDEV
++	depends on DRM_PANEL
++	depends on DRM_MIPI_DSI
++	default n
++	help
++  		reTerminal Touch Panel driver
++
+ endmenu
+diff -ruN linux-patched/drivers/gpu/drm/panel/Makefile linux-custom/drivers/gpu/drm/panel/Makefile
+--- linux-patched/drivers/gpu/drm/panel/Makefile	2026-01-23 23:47:49.963959739 -0600
++++ linux-custom/drivers/gpu/drm/panel/Makefile	2026-01-24 01:05:12.233721941 -0600
+@@ -88,3 +88,4 @@
+ obj-$(CONFIG_DRM_PANEL_WAVESHARE_TOUCHSCREEN) += panel-waveshare-dsi.o
+ obj-$(CONFIG_DRM_PANEL_WIDECHIPS_WS2401) += panel-widechips-ws2401.o
+ obj-$(CONFIG_DRM_PANEL_XINPENG_XPP055C272) += panel-xinpeng-xpp055c272.o
++obj-$(CONFIG_DRM_PANEL_RETERMINAL) += panel-reterminal/
+diff -ruN linux-patched/drivers/gpu/drm/panel/panel-reterminal/Makefile linux-custom/drivers/gpu/drm/panel/panel-reterminal/Makefile
+--- linux-patched/drivers/gpu/drm/panel/panel-reterminal/Makefile	1969-12-31 18:00:00.000000000 -0600
++++ linux-custom/drivers/gpu/drm/panel/panel-reterminal/Makefile	2026-01-24 01:05:12.233721941 -0600
+@@ -0,0 +1,11 @@
++
++obj-m := mipi_dsi.o
++mipi_dsi-objs := mipi_dsi_drv.o touch_panel.o panel-ili9881x.o
++
++all:
++	$(MAKE) -C $(KDIR) M=$(PWD) modules
++	$(MAKE) -C $(KDIR) M=$(PWD) modules_install
++
++clean:
++	$(MAKE) -C $(KDIR) M=$(PWD) clean
++
+diff -ruN linux-patched/drivers/gpu/drm/panel/panel-reterminal/mipi_dsi_drv.c linux-custom/drivers/gpu/drm/panel/panel-reterminal/mipi_dsi_drv.c
+--- linux-patched/drivers/gpu/drm/panel/panel-reterminal/mipi_dsi_drv.c	1969-12-31 18:00:00.000000000 -0600
++++ linux-custom/drivers/gpu/drm/panel/panel-reterminal/mipi_dsi_drv.c	2026-01-24 01:05:12.233721941 -0600
+@@ -0,0 +1,541 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * This is a linux kernel driver for MIPI-DSI 
++ * panel with touch panel attached to I2C bus.
++ *
++ * Copyright (c) 2020 Seeed Studio
++ * Zhangqun Ming<north_sea@qq.com>
++ *
++ * I2C slave address: 0x45
++ */
++#include "mipi_dsi.h"
++#include <linux/version.h>
++
++static int dsi_status = DSI_OK; //0:dsi is ok, not 0:something wrong with dsi
++static ssize_t dsi_state_show(struct device *dev,
++		struct device_attribute *attr, char *buf)
++{
++	if (!dsi_status)
++		return scnprintf(buf, PAGE_SIZE, "ok\r\n");
++	else
++		return scnprintf(buf, PAGE_SIZE, "error : %d\r\n", dsi_status);
++}
++
++static DEVICE_ATTR(dsi_state, 0444, dsi_state_show, NULL);
++
++static struct attribute *dsi_state_attrs[] = {
++	&dev_attr_dsi_state.attr,
++	NULL
++};
++
++static const struct attribute_group dsi_attr_group = {
++	.attrs = dsi_state_attrs,
++};
++
++/*static */int i2c_md_read(struct i2c_mipi_dsi *md, u8 reg, u8 *buf, int len)
++{
++	struct i2c_client *client = md->i2c;
++	struct i2c_msg msgs[1];
++	u8 addr_buf[1] = { reg };
++	u8 data_buf[1] = { 0, };
++	int ret;
++
++	mutex_lock(&md->mutex);
++	/* Write register address */
++	msgs[0].addr = client->addr;
++	msgs[0].flags = 0;
++	msgs[0].len = ARRAY_SIZE(addr_buf);
++	msgs[0].buf = addr_buf;
++
++	ret = i2c_transfer(client->adapter, msgs, ARRAY_SIZE(msgs));
++	if (ret != ARRAY_SIZE(msgs)) {
++		mutex_unlock(&md->mutex);
++		return -EIO;
++	}
++
++	usleep_range(1000, 1500);
++
++	/* Read data from register */
++	msgs[0].addr = client->addr;
++	msgs[0].flags = I2C_M_RD;
++	if (NULL == buf) {
++		msgs[0].len = 1;
++		msgs[0].buf = data_buf;
++	}
++	else {
++		msgs[0].len = len;
++		msgs[0].buf = buf;
++	}
++
++	ret = i2c_transfer(client->adapter, msgs, ARRAY_SIZE(msgs));
++	if (ret != ARRAY_SIZE(msgs)) {
++		mutex_unlock(&md->mutex);
++		return -EIO;
++	}
++	mutex_unlock(&md->mutex);
++
++	if (NULL == buf) {
++		return data_buf[0];	
++	}
++	else {
++		return ret;
++	}
++}
++
++/*static */void i2c_md_write(struct i2c_mipi_dsi *md, u8 reg, u8 val)
++{
++	struct i2c_client *client = md->i2c;
++	int ret;
++
++	mutex_lock(&md->mutex);
++	ret = i2c_smbus_write_byte_data(client, reg, val);
++	if (ret)
++		dev_err(&client->dev, "I2C write failed: %d\n", ret);
++
++	usleep_range(1000, 1500);
++	mutex_unlock(&md->mutex);
++}
++
++
++// MIPI-DSI driver
++
++static int mipi_dsi_probe(struct mipi_dsi_device *dsi)
++{
++	int ret;
++
++	DBG_PRINT("Probe MIPI-DSI driver");
++
++	dsi->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_LPM;
++	dsi->format = MIPI_DSI_FMT_RGB888;
++	dsi->lanes = 4;
++
++	ret = mipi_dsi_attach(dsi);
++	if (ret) {
++		dev_err(&dsi->dev, "failed to attach dsi to host: %d\n", ret);
++		dsi_status = DSI_ATTACH_ERR;
++	}
++
++	return ret;
++}
++
++static struct mipi_dsi_driver mipi_dsi_driver = {
++	.driver.name = MIPI_DSI_DRIVER_NAME,
++	.probe = mipi_dsi_probe,
++};
++
++
++// MIPI-DSI device
++
++static struct mipi_dsi_device *mipi_dsi_device(struct device *dev)
++{
++	struct mipi_dsi_device *dsi = NULL;
++	struct device_node *endpoint, *dsi_host_node;
++	struct mipi_dsi_host *host;
++	struct mipi_dsi_device_info info = {
++		.type = MIPI_DSI_DRIVER_NAME,
++		.channel = 0,
++		.node = NULL,
++	};
++
++	DBG_PRINT("Add MIPI-DSI device to device tree");
++
++	/* Look up the DSI host.  It needs to probe before we do. */
++	endpoint = of_graph_get_next_endpoint(dev->of_node, NULL);
++	if (!endpoint) {
++		dev_err(dev, "No endpoint node!");
++		return ERR_PTR(-ENODEV);
++	}
++
++	dsi_host_node = of_graph_get_remote_port_parent(endpoint);
++	if (!dsi_host_node) {
++		dev_err(dev, "No dsi_host node!");
++		goto error;
++	}
++
++	host = of_find_mipi_dsi_host_by_node(dsi_host_node);
++	of_node_put(dsi_host_node);
++	if (!host) {
++		dev_err(dev, "Can't find mipi_dsi_host!");
++		of_node_put(endpoint);
++		return ERR_PTR(-EPROBE_DEFER);
++	}
++
++	info.node = of_graph_get_remote_port(endpoint);
++	if (!info.node) {
++		dev_err(dev, "Can't get remote port!");
++		goto error;
++	}
++
++	of_node_put(endpoint);
++	dsi = mipi_dsi_device_register_full(host, &info);
++	if(IS_ERR(dsi)) {
++		dev_err(dev, "Can't device register_full!");
++		dsi_status = DSI_REG_ERR;
++		return dsi;
++	}
++
++	return dsi;
++
++error:
++	of_node_put(endpoint);
++	return ERR_PTR(-ENODEV);
++}
++
++
++// Panel
++
++static int panel_prepare(struct drm_panel *panel)
++{
++	int ret = 0;
++	struct i2c_mipi_dsi *md = panel_to_md(panel);
++	const struct drm_panel_funcs *funcs = md->panel_data->funcs;
++
++	DBG_PRINT("Prepare panel");
++
++	/* i2c */
++	/* reset pin */
++	i2c_md_write(md, REG_POWERON, 1);
++	msleep(20);
++	i2c_md_write(md, REG_LCD_RST, 0);
++	msleep(20);
++	i2c_md_write(md, REG_LCD_RST, 1);
++	msleep(50);
++
++	/* panel */
++	if (funcs && funcs->prepare) {
++		ret = funcs->prepare(panel);
++		if (ret < 0){
++			i2c_md_write(md, REG_POWERON, 0);
++			i2c_md_write(md, REG_LCD_RST, 0);
++			i2c_md_write(md, REG_PWM, 0);
++			dsi_status = DSI_PANEL_ERR;
++			return ret;
++		}
++	}
++	return ret;
++}
++
++static int panel_unprepare(struct drm_panel *panel)
++{
++	int ret = 0;
++	struct i2c_mipi_dsi *md = panel_to_md(panel);
++	const struct drm_panel_funcs *funcs = md->panel_data->funcs;
++
++	DBG_PRINT("Unprepare panel");
++
++	if (funcs && funcs->unprepare) {
++		ret = funcs->unprepare(panel);
++		if (ret < 0)
++			return ret;
++	}
++	i2c_md_write(md, REG_LCD_RST, 0);
++	return ret;
++}
++
++static int panel_enable(struct drm_panel * panel)
++{
++	int ret = 0;
++	struct i2c_mipi_dsi *md = panel_to_md(panel);
++	const struct drm_panel_funcs *funcs = md->panel_data->funcs;
++
++	DBG_PRINT("Enable panel");
++
++	/* panel */
++	if (funcs && funcs->enable) {
++		ret = funcs->enable(panel);
++		if (ret < 0)
++			return ret;
++	}
++
++	/* i2c */
++	i2c_md_write(md, REG_PWM, md->brightness);
++
++	return ret;
++}
++
++static int panel_disable(struct drm_panel * panel)
++{
++	int ret = 0;
++	struct i2c_mipi_dsi *md = panel_to_md(panel);
++	const struct drm_panel_funcs *funcs = md->panel_data->funcs;
++
++	DBG_PRINT("Disable panel");
++
++	/* i2c */
++	i2c_md_write(md, REG_PWM, 0);
++
++	/* panel */
++	if (funcs && funcs->disable) {
++		ret = funcs->disable(panel);
++		if (ret < 0)
++			return ret;
++	}
++
++	return ret;
++}
++
++static int panel_get_modes(struct drm_panel *panel, struct drm_connector *connector)
++{
++	int ret = 0;
++	struct i2c_mipi_dsi *md = panel_to_md(panel);
++	const struct drm_panel_funcs *funcs = md->panel_data->funcs;
++
++	if (funcs && funcs->get_modes) {
++		ret = funcs->get_modes(panel, connector);
++		if (ret < 0)
++			return ret;
++	}
++
++	return ret;
++}
++
++static const struct drm_panel_funcs panel_funcs = {
++	.prepare = panel_prepare,
++	.unprepare = panel_unprepare,
++	.enable = panel_enable,
++	.disable = panel_disable,
++	.get_modes = panel_get_modes,
++};
++
++
++// Backlight device
++
++static int backlight_update(struct backlight_device *bd)
++{
++	struct i2c_mipi_dsi *md = bl_get_data(bd);
++	int brightness = bd->props.brightness;
++
++	if (bd->props.power != FB_BLANK_UNBLANK ||
++#if (LINUX_VERSION_CODE <= KERNEL_VERSION(6, 12, 0))
++		bd->props.fb_blank != FB_BLANK_UNBLANK ||
++#endif
++		bd->props.state & (BL_CORE_SUSPENDED | BL_CORE_FBBLANK)) {
++			brightness = 0;
++		}
++
++	DBG_FUNC("brightness=%d", brightness);
++	md->brightness = brightness;
++	i2c_md_write(md, REG_PWM, brightness);
++
++	return 0;
++}
++
++static const struct backlight_ops backlight_ops = {
++	.options = BL_CORE_SUSPENDRESUME,
++	.update_status	= backlight_update,
++};
++
++static int backlight_init(struct i2c_mipi_dsi *md)
++{
++	struct device *dev = &md->i2c->dev;
++	struct backlight_properties props;
++	struct backlight_device *bd;
++
++	DBG_FUNC("Register backlight device");
++	memset(&props, 0, sizeof(props));
++	props.type = BACKLIGHT_RAW;
++	props.max_brightness = 255;
++	bd = devm_backlight_device_register(dev, dev_name(dev),
++					dev, md, &backlight_ops,
++					&props);
++	if (IS_ERR(bd)) {
++		dev_err(dev, "failed to register backlight\n");
++		return PTR_ERR(bd);
++	}
++
++	bd->props.brightness = 255;
++	backlight_update_status(bd);
++
++	return 0;
++}
++
++
++// I2C driver
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
++static int i2c_md_probe(struct i2c_client *i2c)
++#else
++static int i2c_md_probe(struct i2c_client *i2c, const struct i2c_device_id *id)
++#endif
++{
++	struct device *dev = &i2c->dev;
++	struct i2c_mipi_dsi *md;
++	int ret = 0;
++	u8 mcu_img_ver[2];
++
++	DBG_PRINT("Probe I2C driver");
++	DBG_FUNC("Start");
++
++	md = devm_kzalloc(dev, sizeof(*md), GFP_KERNEL);
++	if (!md)
++		return -ENOMEM;
++
++	i2c_set_clientdata(i2c, md);
++	mutex_init(&md->mutex);
++	md->i2c = i2c;
++	md->panel_data = (struct panel_data *)of_device_get_match_data(dev);
++	if (!md->panel_data) {
++		dev_err(dev, "No valid panel data.\n");
++		return -ENODEV;
++	}
++
++	ret = i2c_md_read(md, REG_ID, NULL, 0);
++	if (ret < 0) {
++		dev_err(dev, "I2C read id failed: %d\n", ret);
++		return -ENODEV;
++	}
++	if (ret != 0xC3) {
++		dev_err(dev, "Unknown chip id: 0x%02x\n", ret);
++		return -ENODEV;
++	}
++
++	ret = i2c_md_read(md, REG_TP_VERSION, mcu_img_ver, ARRAY_SIZE(mcu_img_ver));
++	if (ret < 0) {
++		dev_err(dev, "I2C read STM32 firmware version failed: %d\n", ret);
++		return -ENODEV;
++	}
++	DBG_FUNC("STM32 firmware version %u.%u", mcu_img_ver[0], mcu_img_ver[1]);
++
++	i2c_md_write(md, REG_POWERON, 1);
++
++	md->dsi = mipi_dsi_device(dev);
++	if (IS_ERR(md->dsi)) {
++		dev_err(dev, "DSI device registration failed!\n");
++		dsi_status = DSI_FAILURE;
++		return PTR_ERR(md->dsi);
++	}
++
++	DBG_FUNC("Add panel");
++	md->panel_data->set_dsi(md->dsi);
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
++	md->panel.prepare_prev_first = true;
++#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
++	md->panel.prepare_upstream_first = true;
++#endif
++	drm_panel_init(&md->panel, dev, &panel_funcs, DRM_MODE_CONNECTOR_DSI);
++	drm_panel_add(&md->panel);
++
++	tp_init(md);
++	backlight_init(md);
++
++	ret = device_property_read_u32(dev, "mcu_auto_reset_enable", &md->mcu_auto_reset);
++	if(ret < 0){	
++		dev_err(dev, "Can't get the data of mcu_auto_reset!\n");
++	}
++	i2c_md_write(md, REG_MCU_AUTO_RESET, (md->mcu_auto_reset&0xff));
++
++	ret = device_property_read_u32(dev, "tp_point_rotate", &md->tp_point_rotate);
++	if(ret < 0){	
++		dev_err(dev, "Can't get the data of tp_point_rotate!\n");
++	}
++
++	ret = sysfs_create_group(&i2c->dev.kobj, &dsi_attr_group);
++
++	DBG_FUNC("Finish");
++	return 0;
++}
++
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
++static int i2c_md_remove(struct i2c_client *i2c)
++#else
++static void i2c_md_remove(struct i2c_client *i2c)
++#endif
++{
++	struct i2c_mipi_dsi *md = i2c_get_clientdata(i2c);
++
++	DBG_PRINT("Remove I2C driver");
++
++	tp_deinit(md);
++
++	/* Turn off power */
++	i2c_md_write(md, REG_POWERON, 0);
++	i2c_md_write(md, REG_LCD_RST, 0);
++	i2c_md_write(md, REG_PWM, 0);
++
++	// mipi_dsi_detach(md->dsi); // TODO: check if this is needed
++	drm_panel_remove(&md->panel);
++	mipi_dsi_device_unregister(md->dsi);
++	sysfs_remove_group(&i2c->dev.kobj, &dsi_attr_group);
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
++	return 0;
++#endif
++}
++
++static void i2c_md_shutdown(struct i2c_client *i2c)
++{
++	struct i2c_mipi_dsi *md = i2c_get_clientdata(i2c);
++
++	DBG_PRINT("Shutdown I2C driver");
++
++	tp_deinit(md);
++
++	/* Turn off power */
++	i2c_md_write(md, REG_POWERON, 0);
++	i2c_md_write(md, REG_LCD_RST, 0);
++	i2c_md_write(md, REG_PWM, 0);
++
++	// mipi_dsi_detach(md->dsi); // TODO: check if this is needed
++	drm_panel_remove(&md->panel);
++	mipi_dsi_device_unregister(md->dsi);
++}
++
++extern const struct panel_data ili9881x_data;
++static const struct of_device_id i2c_md_of_ids[] = {
++	{
++		.compatible = "i2c_dsi,ili9881x",
++		.data = (const void*)&ili9881x_data,
++	},
++	{ } /* sentinel */
++};
++MODULE_DEVICE_TABLE(of, i2c_md_of_ids);
++
++static struct i2c_driver i2c_md_driver = {
++	.driver = {
++		.name = MIPI_DSI_DRIVER_NAME,
++		.of_match_table = i2c_md_of_ids,
++	},
++	.probe = i2c_md_probe,
++	.remove = i2c_md_remove,
++	.shutdown = i2c_md_shutdown,
++};
++
++
++// Kernel module
++
++static int __init i2c_md_init(void)
++{
++	int ret;
++
++	DBG_PRINT("Initialize kernel module");
++
++	DBG_FUNC("Add I2C driver");
++	ret = i2c_add_driver(&i2c_md_driver);
++	if (ret < 0)
++		return ret;
++
++	DBG_FUNC("Register MIPI-DSI driver");
++	ret = mipi_dsi_driver_register(&mipi_dsi_driver);
++	if (ret < 0){
++		dsi_status = DSI_REG_ERR;
++		return ret;
++	}
++
++	return ret;
++}
++module_init(i2c_md_init);
++
++static void __exit i2c_md_exit(void)
++{
++	DBG_PRINT("Exit kernel module");
++
++	DBG_FUNC("Unregister MIPI-DSI driver");
++	mipi_dsi_driver_unregister(&mipi_dsi_driver);
++
++	DBG_FUNC("Delete I2C driver");
++	i2c_del_driver(&i2c_md_driver);
++}
++module_exit(i2c_md_exit);
++
++MODULE_AUTHOR("Zhangqun Ming <north_sea@qq.com>");
++MODULE_AUTHOR("Seeed, Inc.");
++MODULE_DESCRIPTION("MIPI-DSI driver");
++MODULE_LICENSE("GPL v2");
+diff -ruN linux-patched/drivers/gpu/drm/panel/panel-reterminal/mipi_dsi.h linux-custom/drivers/gpu/drm/panel/panel-reterminal/mipi_dsi.h
+--- linux-patched/drivers/gpu/drm/panel/panel-reterminal/mipi_dsi.h	1969-12-31 18:00:00.000000000 -0600
++++ linux-custom/drivers/gpu/drm/panel/panel-reterminal/mipi_dsi.h	2026-01-24 01:05:12.233721941 -0600
+@@ -0,0 +1,148 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * mipi_dsi.h - MIPI dsi module
++ *
++ * Copyright (c) 2020 Seeed Studio
++ * Zhangqun Ming<north_sea@qq.com>
++ *
++ * I2C slave address: 0x45
++ */
++
++#ifndef __MIPI_DSI_H__
++#define __MIPI_DSI_H__
++
++
++#include <linux/interrupt.h>
++#include <linux/bitops.h>
++#include <linux/slab.h>
++#include <linux/string.h>
++
++#include <linux/delay.h>
++#include <linux/err.h>
++#include <linux/fb.h>
++#include <linux/gpio.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/of_device.h>
++#include <linux/of_graph.h>
++#include <linux/pm.h>
++#include <linux/backlight.h>
++
++#include <drm/drm_crtc.h>
++#include <drm/drm_device.h>
++#include <drm/drm_mipi_dsi.h>
++#include <drm/drm_panel.h>
++#include <drm/drm_modes.h>
++
++#include <video/mipi_display.h>
++
++#include <linux/input.h>
++#include <linux/input/mt.h>
++#include <linux/input/touchscreen.h>
++
++#define MIPI_DSI_DRIVER_NAME        "mipi_dsi"
++
++#define I2C_DSI_DBG
++#ifdef I2C_DSI_DBG
++#define DBG_FUNC(format, x...)      printk(KERN_INFO MIPI_DSI_DRIVER_NAME ": (%s) " format "\n", __func__, ##x)
++#define DBG_PRINT(format, x...)     printk(KERN_INFO MIPI_DSI_DRIVER_NAME ": " format "\n", ##x)
++#else
++#define DBG_FUNC(format, x...)
++#define DBG_PRINT(format, x...)
++#endif
++
++/* i2c: commands */
++enum REG_ADDR {
++	REG_ID = 0x80,
++	REG_PORTA,	/* BIT(2) for horizontal flip, BIT(3) for vertical flip */
++	REG_PORTB,  // --
++	REG_PORTC,
++	REG_PORTD,
++	REG_POWERON,// --
++	REG_PWM,    // --
++	REG_DDRA,
++	REG_DDRB,
++	REG_DDRC,
++	REG_DDRD,
++	REG_TEST,
++	REG_WR_ADDRL,
++	REG_WR_ADDRH,
++	REG_READH,
++	REG_READL,
++	REG_WRITEH,
++	REG_WRITEL,
++	REG_ID2,
++
++	REG_LCD_RST,
++	REG_TP_RST,
++	REG_TP_STATUS,
++	REG_TP_POINT,
++	REG_TP_VERSION,
++	REG_ADC1,
++	REG_ADC2,
++	REG_MCU_AUTO_RESET,
++
++	REG_MAX
++};
++
++/* dsi error code */
++enum DSI_ERR {
++	DSI_OK = 0,
++	DSI_FAILURE = -1,
++	DSI_REG_ERR = -2,
++	DSI_ATTACH_ERR = -3,
++	DSI_I2C_ERR = -4,
++	DSI_PANEL_ERR = -5,
++};
++#define DSI_DCS_WRITE(dsi, seq...)		\
++	{									\
++		int ret = 0;					\
++		const u8 d[] = { seq };			\
++		ret = mipi_dsi_dcs_write_buffer(dsi, d, ARRAY_SIZE(d));	\
++		if (ret < 0)		\
++			return ret;		\
++	}
++
++struct panel_data {
++	void (*set_dsi)(struct mipi_dsi_device *dsi);
++	const struct drm_panel_funcs *funcs;
++
++	
++};
++
++struct i2c_mipi_dsi {
++	struct i2c_client *i2c;
++	struct mutex mutex;
++	
++	// panel
++	struct drm_panel panel;
++	struct panel_data *panel_data;
++
++	// dsi
++	struct mipi_dsi_device *dsi;
++
++	// tp
++	struct input_dev *input;
++	struct touchscreen_properties prop;
++	uint32_t tp_point_rotate;
++
++	// backlight
++	int brightness;
++
++	// mcu auto reset enable when the tp driver is not working
++	uint32_t mcu_auto_reset;
++};
++#define panel_to_md(_p)	container_of(_p, struct i2c_mipi_dsi, panel)
++
++
++/* i2c */
++int i2c_md_read(struct i2c_mipi_dsi *md, u8 reg, u8 *buf, int len);
++void i2c_md_write(struct i2c_mipi_dsi *md, u8 reg, u8 val);
++
++// touch panel
++int tp_init(struct i2c_mipi_dsi *md);
++int tp_deinit(struct i2c_mipi_dsi *md);
++
++#endif /*End of header guard macro */
+diff -ruN linux-patched/drivers/gpu/drm/panel/panel-reterminal/panel-ili9881x.c linux-custom/drivers/gpu/drm/panel/panel-reterminal/panel-ili9881x.c
+--- linux-patched/drivers/gpu/drm/panel/panel-reterminal/panel-ili9881x.c	1969-12-31 18:00:00.000000000 -0600
++++ linux-custom/drivers/gpu/drm/panel/panel-reterminal/panel-ili9881x.c	2026-01-24 01:05:12.233721941 -0600
+@@ -0,0 +1,820 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * ILI9881D panel driver
++ * 
++ * Copyright (c) 2020 Seeed Studio
++ * Zhangqun Ming<north_sea@qq.com>
++ * Modified by Hongtai Liu for compatibility with ILI9881C and ILI9881D
++ */
++#include "mipi_dsi.h"
++
++
++static struct mipi_dsi_device *ili9881x_dsi = NULL;
++
++static const struct drm_display_mode ili9881x_modes = {
++	.clock		= 62712 /*73164*/ /*83616*/ /*94068*/ /*104520*/,
++
++	.hdisplay	= 720,
++	.hsync_start= 720 + 10,
++	.hsync_end	= 720 + 10 + 20,
++	.htotal		= 720 + 10 + 20 + 30,
++
++	.vdisplay	= 1280,
++	.vsync_start= 1280 + 10,
++	.vsync_end	= 1280 + 10 + 20,
++	.vtotal		= 1280 + 10 + 20 + 30,
++
++	.width_mm	= 62,
++	.height_mm	= 110,
++};
++
++// Panel type enum
++enum ili9881_panel_type {
++	ILI9881_UNKNOWN = 0,
++	ILI9881D03,
++	ILI9881D02,
++	ILI9881C05,
++};
++
++static enum ili9881_panel_type panel_type = ILI9881_UNKNOWN;
++
++#define ILI9881_PAGE(page) \
++	mipi_dsi_dcs_write_buffer(dsi, (u8[]){0xFF, 0x98, 0x81, (page)}, 4)
++
++#define ILI9881_COMMAND(cmd, ...) \
++	do { \
++		u8 data[] = { __VA_ARGS__ }; \
++		mipi_dsi_dcs_write(dsi, (cmd), data, sizeof(data)); \
++	} while (0)
++
++// Read ID from page 1 registers 0xF0, 0xF1, 0xF2, 0xF4
++static int ili9881_read_id(struct mipi_dsi_device *dsi)
++{
++	u8 id[4] = {0};
++	int ret;
++
++	// Try to detect ILI9881C first
++	ret = ILI9881_PAGE(0x01);
++	if (ret < 0) return ret;
++	ret = mipi_dsi_dcs_read(dsi, 0x00, &id[0], 1);
++	ret |= mipi_dsi_dcs_read(dsi, 0x01, &id[1], 1);
++	ret |= mipi_dsi_dcs_read(dsi, 0x02, &id[2], 1);
++	if (ret >= 0 && id[0] == 0x98 && id[1] == 0x81 && id[2] == 0x5C) {
++		panel_type = ILI9881C05;
++		pr_info("Detected ILI9881C05: ID = %02x %02x %02x\n", id[0], id[1], id[2]);
++		return 0;
++	}
++
++	// If not ILI9881C, try to detect ILI9881D
++	ret = ILI9881_PAGE(0x06);
++	if (ret < 0) return ret;
++	ret = mipi_dsi_dcs_read(dsi, 0xF0, &id[0], 1);
++	ret |= mipi_dsi_dcs_read(dsi, 0xF1, &id[1], 1);
++	ret |= mipi_dsi_dcs_read(dsi, 0xF2, &id[2], 1);
++	ret |= mipi_dsi_dcs_read(dsi, 0xF3, &id[3], 1);
++	if (ret >= 0 && id[0] == 0x98 && id[1] == 0x81) {
++		if(id[2] == 0x1A){
++			panel_type = ILI9881D03;
++			pr_info("Detected ILI9881D03: ID = %02x %02x %02x %02x\n", id[0], id[1], id[2], id[3]);
++		}else if(id[2] == 0x0D){
++			panel_type = ILI9881D02;
++			pr_info("Detected ILI9881D02: ID = %02x %02x %02x %02x\n", id[0], id[1], id[2], id[3]);
++		}
++		return 0;
++	}
++
++	panel_type = ILI9881_UNKNOWN;
++	pr_warn("Unknown ILI9881 panel ID\n");
++	return -ENODEV;
++}
++
++// Optional: Add ILI9881C05-specific initialization here
++static void ili9881c05_init(struct mipi_dsi_device *dsi)
++{
++	pr_info("Initializing ILI9881C05 display...\n");
++	ILI9881_PAGE(0x03);
++	ILI9881_COMMAND(0x01, 0x00);
++	ILI9881_COMMAND(0x02, 0x00);
++	ILI9881_COMMAND(0x03, 0x73);
++	ILI9881_COMMAND(0x04, 0x00);
++	ILI9881_COMMAND(0x05, 0x00);
++	ILI9881_COMMAND(0x06, 0x0A);
++	ILI9881_COMMAND(0x07, 0x00);
++	ILI9881_COMMAND(0x08, 0x00);
++	ILI9881_COMMAND(0x09, 0x01);
++	ILI9881_COMMAND(0x0A, 0x00);
++	ILI9881_COMMAND(0x0B, 0x00);
++	ILI9881_COMMAND(0x0C, 0x01);
++	ILI9881_COMMAND(0x0D, 0x00);
++	ILI9881_COMMAND(0x0E, 0x00);
++	ILI9881_COMMAND(0x0F, 0x1D);
++	ILI9881_COMMAND(0x10, 0x1D);
++	ILI9881_COMMAND(0x11, 0x00);
++	ILI9881_COMMAND(0x12, 0x00);
++	ILI9881_COMMAND(0x13, 0x00);
++	ILI9881_COMMAND(0x14, 0x00);
++	ILI9881_COMMAND(0x15, 0x00);
++	ILI9881_COMMAND(0x16, 0x00);
++	ILI9881_COMMAND(0x17, 0x00);
++	ILI9881_COMMAND(0x18, 0x00);
++	ILI9881_COMMAND(0x19, 0x00);
++	ILI9881_COMMAND(0x1A, 0x00);
++	ILI9881_COMMAND(0x1B, 0x00);
++	ILI9881_COMMAND(0x1C, 0x00);
++	ILI9881_COMMAND(0x1D, 0x00);
++	ILI9881_COMMAND(0x1E, 0x40);
++	ILI9881_COMMAND(0x1F, 0x80);
++	ILI9881_COMMAND(0x20, 0x06);
++	ILI9881_COMMAND(0x21, 0x02);
++	ILI9881_COMMAND(0x22, 0x00);
++	ILI9881_COMMAND(0x23, 0x00);
++	ILI9881_COMMAND(0x24, 0x00);
++	ILI9881_COMMAND(0x25, 0x00);
++	ILI9881_COMMAND(0x26, 0x00);
++	ILI9881_COMMAND(0x27, 0x00);
++	ILI9881_COMMAND(0x28, 0x33);
++	ILI9881_COMMAND(0x29, 0x03);
++	ILI9881_COMMAND(0x2A, 0x00);
++	ILI9881_COMMAND(0x2B, 0x00);
++	ILI9881_COMMAND(0x2C, 0x00);
++	ILI9881_COMMAND(0x2D, 0x00);
++	ILI9881_COMMAND(0x2E, 0x00);
++	ILI9881_COMMAND(0x2F, 0x00);
++	ILI9881_COMMAND(0x30, 0x00);
++	ILI9881_COMMAND(0x31, 0x00);
++	ILI9881_COMMAND(0x32, 0x00);
++	ILI9881_COMMAND(0x33, 0x00);
++	ILI9881_COMMAND(0x34, 0x04);
++	ILI9881_COMMAND(0x35, 0x00);
++	ILI9881_COMMAND(0x36, 0x00);
++	ILI9881_COMMAND(0x37, 0x00);
++	ILI9881_COMMAND(0x38, 0x3C);
++	ILI9881_COMMAND(0x39, 0x00);
++	ILI9881_COMMAND(0x3A, 0x40);
++	ILI9881_COMMAND(0x3B, 0x40);
++	ILI9881_COMMAND(0x3C, 0x00);
++	ILI9881_COMMAND(0x3D, 0x00);
++	ILI9881_COMMAND(0x3E, 0x00);
++	ILI9881_COMMAND(0x3F, 0x00);
++	ILI9881_COMMAND(0x40, 0x00);
++	ILI9881_COMMAND(0x41, 0x00);
++	ILI9881_COMMAND(0x42, 0x00);
++	ILI9881_COMMAND(0x43, 0x00);
++	ILI9881_COMMAND(0x44, 0x00);
++	ILI9881_COMMAND(0x50, 0x01);
++	ILI9881_COMMAND(0x51, 0x23);
++	ILI9881_COMMAND(0x52, 0x45);
++	ILI9881_COMMAND(0x53, 0x67);
++	ILI9881_COMMAND(0x54, 0x89);
++	ILI9881_COMMAND(0x55, 0xAB);
++	ILI9881_COMMAND(0x56, 0x01);
++	ILI9881_COMMAND(0x57, 0x23);
++	ILI9881_COMMAND(0x58, 0x45);
++	ILI9881_COMMAND(0x59, 0x67);
++	ILI9881_COMMAND(0x5A, 0x89);
++	ILI9881_COMMAND(0x5B, 0xAB);
++	ILI9881_COMMAND(0x5C, 0xCD);
++	ILI9881_COMMAND(0x5D, 0xEF);
++	ILI9881_COMMAND(0x5E, 0x11);
++	ILI9881_COMMAND(0x5F, 0x01);
++	ILI9881_COMMAND(0x60, 0x00);
++	ILI9881_COMMAND(0x61, 0x15);
++	ILI9881_COMMAND(0x62, 0x14);
++	ILI9881_COMMAND(0x63, 0x0E);
++	ILI9881_COMMAND(0x64, 0x0F);
++	ILI9881_COMMAND(0x65, 0x0C);
++	ILI9881_COMMAND(0x66, 0x0D);
++	ILI9881_COMMAND(0x67, 0x06);
++	ILI9881_COMMAND(0x68, 0x02);
++	ILI9881_COMMAND(0x69, 0x07);
++	ILI9881_COMMAND(0x6A, 0x02);
++	ILI9881_COMMAND(0x6B, 0x02);
++	ILI9881_COMMAND(0x6C, 0x02);
++	ILI9881_COMMAND(0x6D, 0x02);
++	ILI9881_COMMAND(0x6E, 0x02);
++	ILI9881_COMMAND(0x6F, 0x02);
++	ILI9881_COMMAND(0x70, 0x02);
++	ILI9881_COMMAND(0x71, 0x02);
++	ILI9881_COMMAND(0x72, 0x02);
++	ILI9881_COMMAND(0x73, 0x02);
++	ILI9881_COMMAND(0x74, 0x02);
++	ILI9881_COMMAND(0x75, 0x01);
++	ILI9881_COMMAND(0x76, 0x00);
++	ILI9881_COMMAND(0x77, 0x14);
++	ILI9881_COMMAND(0x78, 0x15);
++	ILI9881_COMMAND(0x79, 0x0E);
++	ILI9881_COMMAND(0x7A, 0x0F);
++	ILI9881_COMMAND(0x7B, 0x0C);
++	ILI9881_COMMAND(0x7C, 0x0D);
++	ILI9881_COMMAND(0x7D, 0x06);
++	ILI9881_COMMAND(0x7E, 0x02);
++	ILI9881_COMMAND(0x7F, 0x07);
++	ILI9881_COMMAND(0x80, 0x02);
++	ILI9881_COMMAND(0x81, 0x02);
++	ILI9881_COMMAND(0x82, 0x02);
++	ILI9881_COMMAND(0x83, 0x02);
++	ILI9881_COMMAND(0x84, 0x02);
++	ILI9881_COMMAND(0x85, 0x02);
++	ILI9881_COMMAND(0x86, 0x02);
++	ILI9881_COMMAND(0x87, 0x02);
++	ILI9881_COMMAND(0x88, 0x02);
++	ILI9881_COMMAND(0x89, 0x02);
++	ILI9881_COMMAND(0x8A, 0x02);
++	ILI9881_PAGE(0x04);
++	ILI9881_COMMAND(0x38, 0x01);
++	ILI9881_COMMAND(0x39, 0x00);
++	ILI9881_COMMAND(0x6C, 0x15);
++	ILI9881_COMMAND(0x6E, 0x2B);
++	ILI9881_COMMAND(0x6F, 0x33);
++	ILI9881_COMMAND(0x8D, 0x18);
++	ILI9881_COMMAND(0x87, 0xBA);
++	ILI9881_COMMAND(0x26, 0x76);
++	ILI9881_COMMAND(0xB2, 0xD1);
++	ILI9881_COMMAND(0xB5, 0x06);
++	ILI9881_COMMAND(0x3A, 0x24);
++	ILI9881_COMMAND(0x35, 0x1F);
++	ILI9881_COMMAND(0x33, 0x14);
++	ILI9881_COMMAND(0x3B, 0x98);
++	ILI9881_PAGE(0x01);
++	ILI9881_COMMAND(0x22, 0x0A);
++	ILI9881_COMMAND(0x31, 0x00);
++	ILI9881_COMMAND(0x40, 0x33);
++	ILI9881_COMMAND(0x53, 0xA8);
++	ILI9881_COMMAND(0x55, 0xB8);
++	ILI9881_COMMAND(0x50, 0x96);
++	ILI9881_COMMAND(0x51, 0x96);
++	ILI9881_COMMAND(0x60, 0x22);
++	ILI9881_COMMAND(0x61, 0x00);
++	ILI9881_COMMAND(0x62, 0x19);
++	ILI9881_COMMAND(0x63, 0x00);
++	ILI9881_COMMAND(0xA0, 0x08);
++	ILI9881_COMMAND(0xA1, 0x11);
++	ILI9881_COMMAND(0xA2, 0x19);
++	ILI9881_COMMAND(0xA3, 0x0D);
++	ILI9881_COMMAND(0xA4, 0x0D);
++	ILI9881_COMMAND(0xA5, 0x1E);
++	ILI9881_COMMAND(0xA6, 0x14);
++	ILI9881_COMMAND(0xA7, 0x17);
++	ILI9881_COMMAND(0xA8, 0x4F);
++	ILI9881_COMMAND(0xA9, 0x1A);
++	ILI9881_COMMAND(0xAA, 0x27);
++	ILI9881_COMMAND(0xAB, 0x49);
++	ILI9881_COMMAND(0xAC, 0x1A);
++	ILI9881_COMMAND(0xAD, 0x18);
++	ILI9881_COMMAND(0xAE, 0x4C);
++	ILI9881_COMMAND(0xAF, 0x22);
++	ILI9881_COMMAND(0xB0, 0x27);
++	ILI9881_COMMAND(0xB1, 0x4B);
++	ILI9881_COMMAND(0xB2, 0x60);
++	ILI9881_COMMAND(0xB3, 0x39);
++	ILI9881_COMMAND(0xC0, 0x08);
++	ILI9881_COMMAND(0xC1, 0x11);
++	ILI9881_COMMAND(0xC2, 0x19);
++	ILI9881_COMMAND(0xC3, 0x0D);
++	ILI9881_COMMAND(0xC4, 0x0D);
++	ILI9881_COMMAND(0xC5, 0x1E);
++	ILI9881_COMMAND(0xC6, 0x14);
++	ILI9881_COMMAND(0xC7, 0x17);
++	ILI9881_COMMAND(0xC8, 0x4F);
++	ILI9881_COMMAND(0xC9, 0x1A);
++	ILI9881_COMMAND(0xCA, 0x27);
++	ILI9881_COMMAND(0xCB, 0x49);
++	ILI9881_COMMAND(0xCC, 0x1A);
++	ILI9881_COMMAND(0xCD, 0x18);
++	ILI9881_COMMAND(0xCE, 0x4C);
++	ILI9881_COMMAND(0xCF, 0x33);
++	ILI9881_COMMAND(0xD0, 0x27);
++	ILI9881_COMMAND(0xD1, 0x4B);
++	ILI9881_COMMAND(0xD2, 0x60);
++	ILI9881_COMMAND(0xD3, 0x39);
++	ILI9881_PAGE(0x00);
++	ILI9881_COMMAND(0x36, 0x00);
++	ILI9881_COMMAND(0x35, 0x00);
++	ILI9881_COMMAND(0x11); // Sleep Out
++	msleep(120);
++	ILI9881_COMMAND(0x29); // Display On
++	msleep(40);
++}
++
++// Optional: Add ILI9881D02-specific initialization here
++static void ili9881d02_init(struct mipi_dsi_device *dsi)
++{
++	pr_info("Initializing ILI9881D02 display...\n");
++	
++	// Page 0x03
++	ILI9881_PAGE(0x03);
++	ILI9881_COMMAND(0x01, 0x00);
++	ILI9881_COMMAND(0x02, 0x00);
++	ILI9881_COMMAND(0x03, 0x73);
++	ILI9881_COMMAND(0x04, 0x00);
++	ILI9881_COMMAND(0x05, 0x00);
++	ILI9881_COMMAND(0x06, 0x0A);
++	ILI9881_COMMAND(0x07, 0x00);
++	ILI9881_COMMAND(0x08, 0x00);
++	ILI9881_COMMAND(0x09, 0x01);
++	ILI9881_COMMAND(0x0A, 0x01); // Modified from 0x00
++	ILI9881_COMMAND(0x0B, 0x00);
++	ILI9881_COMMAND(0x0C, 0x01);
++	ILI9881_COMMAND(0x0D, 0x00);
++	ILI9881_COMMAND(0x0E, 0x00);
++	ILI9881_COMMAND(0x0F, 0x1D);
++	ILI9881_COMMAND(0x10, 0x01); // Modified from 0x1D
++	ILI9881_COMMAND(0x11, 0x00);
++	ILI9881_COMMAND(0x12, 0x00);
++	ILI9881_COMMAND(0x13, 0x00);
++	ILI9881_COMMAND(0x14, 0x00);
++	ILI9881_COMMAND(0x15, 0x00);
++	ILI9881_COMMAND(0x16, 0x00);
++	ILI9881_COMMAND(0x17, 0x00);
++	ILI9881_COMMAND(0x18, 0x00);
++	ILI9881_COMMAND(0x19, 0x00);
++	ILI9881_COMMAND(0x1A, 0x00);
++	ILI9881_COMMAND(0x1B, 0x00);
++	ILI9881_COMMAND(0x1C, 0x00);
++	ILI9881_COMMAND(0x1D, 0x00);
++	ILI9881_COMMAND(0x1E, 0x40);
++	ILI9881_COMMAND(0x1F, 0x80);
++	ILI9881_COMMAND(0x20, 0x06);
++	ILI9881_COMMAND(0x21, 0x02);
++	ILI9881_COMMAND(0x22, 0x00);
++	ILI9881_COMMAND(0x23, 0x00);
++	ILI9881_COMMAND(0x24, 0x00);
++	ILI9881_COMMAND(0x25, 0x00);
++	ILI9881_COMMAND(0x26, 0x00);
++	ILI9881_COMMAND(0x27, 0x00);
++	ILI9881_COMMAND(0x28, 0x33);
++	ILI9881_COMMAND(0x29, 0x03);
++	ILI9881_COMMAND(0x2A, 0x00);
++	ILI9881_COMMAND(0x2B, 0x00);
++	ILI9881_COMMAND(0x2C, 0x00);
++	ILI9881_COMMAND(0x2D, 0x00);
++	ILI9881_COMMAND(0x2E, 0x00);
++	ILI9881_COMMAND(0x2F, 0x00);
++	ILI9881_COMMAND(0x30, 0x00);
++	ILI9881_COMMAND(0x31, 0x00);
++	ILI9881_COMMAND(0x32, 0x00);
++	ILI9881_COMMAND(0x33, 0x00);
++	ILI9881_COMMAND(0x34, 0x04);
++	ILI9881_COMMAND(0x35, 0x00);
++	ILI9881_COMMAND(0x36, 0x00);
++	ILI9881_COMMAND(0x37, 0x00);
++	ILI9881_COMMAND(0x38, 0x3C);
++	ILI9881_COMMAND(0x39, 0x35); // Modified from 0x00
++	ILI9881_COMMAND(0x3A, 0x01);  // Modified from 0x40
++	ILI9881_COMMAND(0x3B, 0x40);
++	ILI9881_COMMAND(0x3C, 0x00);
++	ILI9881_COMMAND(0x3D, 0x01);  // Modified from 0x00
++	ILI9881_COMMAND(0x3E, 0x00);
++	ILI9881_COMMAND(0x3F, 0x00);
++	ILI9881_COMMAND(0x40, 0x00);
++	ILI9881_COMMAND(0x41, 0x88); // Modified from 0x00
++	ILI9881_COMMAND(0x42, 0x00);
++	ILI9881_COMMAND(0x43, 0x00);
++	ILI9881_COMMAND(0x44, 0x1F); // Modified from 0x00
++	ILI9881_COMMAND(0x50, 0x01);
++	ILI9881_COMMAND(0x51, 0x23);
++	ILI9881_COMMAND(0x52, 0x45);
++	ILI9881_COMMAND(0x53, 0x67);
++	ILI9881_COMMAND(0x54, 0x89);
++	ILI9881_COMMAND(0x55, 0xAB);
++	ILI9881_COMMAND(0x56, 0x01);
++	ILI9881_COMMAND(0x57, 0x23);
++	ILI9881_COMMAND(0x58, 0x45);
++	ILI9881_COMMAND(0x59, 0x67);
++	ILI9881_COMMAND(0x5A, 0x89);
++	ILI9881_COMMAND(0x5B, 0xAB);
++	ILI9881_COMMAND(0x5C, 0xCD);
++	ILI9881_COMMAND(0x5D, 0xEF);
++	ILI9881_COMMAND(0x5E, 0x11);
++	ILI9881_COMMAND(0x5F, 0x01);
++	ILI9881_COMMAND(0x60, 0x00);
++	ILI9881_COMMAND(0x61, 0x15);
++	ILI9881_COMMAND(0x62, 0x14);
++	ILI9881_COMMAND(0x63, 0x0E);
++	ILI9881_COMMAND(0x64, 0x0F);
++	ILI9881_COMMAND(0x65, 0x0C);
++	ILI9881_COMMAND(0x66, 0x0D);
++	ILI9881_COMMAND(0x67, 0x06);
++	ILI9881_COMMAND(0x68, 0x02);
++	ILI9881_COMMAND(0x69, 0x07);
++	ILI9881_COMMAND(0x6A, 0x02);
++	ILI9881_COMMAND(0x6B, 0x02);
++	ILI9881_COMMAND(0x6C, 0x02);
++	ILI9881_COMMAND(0x6D, 0x02);
++	ILI9881_COMMAND(0x6E, 0x02);
++	ILI9881_COMMAND(0x6F, 0x02);
++	ILI9881_COMMAND(0x70, 0x02);
++	ILI9881_COMMAND(0x71, 0x02);
++	ILI9881_COMMAND(0x72, 0x02);
++	ILI9881_COMMAND(0x73, 0x02);
++	ILI9881_COMMAND(0x74, 0x02);
++	ILI9881_COMMAND(0x75, 0x01);
++	ILI9881_COMMAND(0x76, 0x00);
++	ILI9881_COMMAND(0x77, 0x14);
++	ILI9881_COMMAND(0x78, 0x15);
++	ILI9881_COMMAND(0x79, 0x0E);
++	ILI9881_COMMAND(0x7A, 0x0F);
++	ILI9881_COMMAND(0x7B, 0x0C);
++	ILI9881_COMMAND(0x7C, 0x0D);
++	ILI9881_COMMAND(0x7D, 0x06);
++	ILI9881_COMMAND(0x7E, 0x02);
++	ILI9881_COMMAND(0x7F, 0x07);
++	ILI9881_COMMAND(0x80, 0x02);
++	ILI9881_COMMAND(0x81, 0x02);
++	ILI9881_COMMAND(0x82, 0x02);
++	ILI9881_COMMAND(0x83, 0x02);
++	ILI9881_COMMAND(0x84, 0x02);
++	ILI9881_COMMAND(0x85, 0x02);
++	ILI9881_COMMAND(0x86, 0x02);
++	ILI9881_COMMAND(0x87, 0x02);
++	ILI9881_COMMAND(0x88, 0x02);
++	ILI9881_COMMAND(0x89, 0x02);
++	ILI9881_COMMAND(0x8A, 0x02);
++
++	// Page 0x04
++	ILI9881_PAGE(0x04);
++	ILI9881_COMMAND(0x70, 0x00);
++	ILI9881_COMMAND(0x71, 0x00);
++	ILI9881_COMMAND(0x82, 0x0F); // VGH_MOD clamp level = 15V
++	ILI9881_COMMAND(0x84, 0x0F); // VGH clamp level = 15V
++	ILI9881_COMMAND(0x85, 0x0D); // VGL clamp level = -10V
++	ILI9881_COMMAND(0x32, 0xAC);
++	ILI9881_COMMAND(0x8C, 0x80);
++	ILI9881_COMMAND(0x3C, 0xF5);
++	ILI9881_COMMAND(0xB5, 0x07); // Gamma OP
++	ILI9881_COMMAND(0x31, 0x45); // Source OP
++	ILI9881_COMMAND(0x3A, 0x24); // PS_EN OFF
++	ILI9881_COMMAND(0x88, 0x33);
++
++	// Page 0x01
++	ILI9881_PAGE(0x01);
++	ILI9881_COMMAND(0x22, 0x09); // BGR, SS, GS settings
++	ILI9881_COMMAND(0x31, 0x00); // Column inversion
++	ILI9881_COMMAND(0x53, 0x8A); // VCOM1
++	ILI9881_COMMAND(0x55, 0xA2); // VCOM2
++	ILI9881_COMMAND(0x50, 0x81); // VREG1OUT = 5V
++	ILI9881_COMMAND(0x51, 0x85); // VREG2OUT = -5V
++	ILI9881_COMMAND(0x62, 0x0D); // EQT Time setting
++
++	// Gamma settings (Page 0x01 repeated for clarity, as in original)
++	ILI9881_PAGE(0x01);
++	ILI9881_COMMAND(0xA0, 0x00);
++	ILI9881_COMMAND(0xA1, 0x1A);
++	ILI9881_COMMAND(0xA2, 0x28);
++	ILI9881_COMMAND(0xA3, 0x13);
++	ILI9881_COMMAND(0xA4, 0x16);
++	ILI9881_COMMAND(0xA5, 0x29);
++	ILI9881_COMMAND(0xA6, 0x1D);
++	ILI9881_COMMAND(0xA7, 0x1E);
++	ILI9881_COMMAND(0xA8, 0x84);
++	ILI9881_COMMAND(0xA9, 0x1C);
++	ILI9881_COMMAND(0xAA, 0x28);
++	ILI9881_COMMAND(0xAB, 0x75);
++	ILI9881_COMMAND(0xAC, 0x1A);
++	ILI9881_COMMAND(0xAD, 0x19);
++	ILI9881_COMMAND(0xAE, 0x4D);
++	ILI9881_COMMAND(0xAF, 0x22);
++	ILI9881_COMMAND(0xB0, 0x28);
++	ILI9881_COMMAND(0xB1, 0x54);
++	ILI9881_COMMAND(0xB2, 0x66);
++	ILI9881_COMMAND(0xB3, 0x39);
++	ILI9881_COMMAND(0xC0, 0x00);
++	ILI9881_COMMAND(0xC1, 0x1A);
++	ILI9881_COMMAND(0xC2, 0x28);
++	ILI9881_COMMAND(0xC3, 0x13);
++	ILI9881_COMMAND(0xC4, 0x16);
++	ILI9881_COMMAND(0xC5, 0x29);
++	ILI9881_COMMAND(0xC6, 0x1D);
++	ILI9881_COMMAND(0xC7, 0x1E);
++	ILI9881_COMMAND(0xC8, 0x84);
++	ILI9881_COMMAND(0xC9, 0x1C);
++	ILI9881_COMMAND(0xCA, 0x28);
++	ILI9881_COMMAND(0xCB, 0x75);
++	ILI9881_COMMAND(0xCC, 0x1A);
++	ILI9881_COMMAND(0xCD, 0x19);
++	ILI9881_COMMAND(0xCE, 0x4D);
++	ILI9881_COMMAND(0xCF, 0x22);
++	ILI9881_COMMAND(0xD0, 0x28);
++	ILI9881_COMMAND(0xD1, 0x54);
++	ILI9881_COMMAND(0xD2, 0x66);
++	ILI9881_COMMAND(0xD3, 0x39);
++
++	// Page 0x00
++	ILI9881_PAGE(0x00);
++	ILI9881_COMMAND(0x35, 0x00); // TE on (commented out as in original)
++	ILI9881_COMMAND(0x36, 0x03);
++	ILI9881_COMMAND(0x11); // Sleep Out
++	msleep(120); // Wait 120ms
++	ILI9881_COMMAND(0x29); // Display On
++	msleep(40); // Wait 40ms
++}
++
++// Optional: Add ILI9881D03-specific initialization here
++static void ili9881d03_init(struct mipi_dsi_device *dsi)
++{
++	pr_info("Initializing ILI9881D03 display...\n");
++
++	ILI9881_PAGE(0x01);           
++	ILI9881_COMMAND(0x91,0x00);
++	ILI9881_COMMAND(0x92,0x00);
++	ILI9881_COMMAND(0x93,0x72);
++	ILI9881_COMMAND(0x94,0x00);
++	ILI9881_COMMAND(0x95,0x00);
++	ILI9881_COMMAND(0x96,0x09);
++	ILI9881_COMMAND(0x97,0x00);
++	ILI9881_COMMAND(0x98,0x00);
++
++	ILI9881_COMMAND(0x09,0x01);
++	ILI9881_COMMAND(0x0a,0x00);
++	ILI9881_COMMAND(0x0b,0x00);
++	ILI9881_COMMAND(0x0c,0x01);
++	ILI9881_COMMAND(0x0d,0x00);
++	ILI9881_COMMAND(0x0e,0x00);
++	ILI9881_COMMAND(0x0f,0x1D);
++	ILI9881_COMMAND(0x10,0x1D);
++	ILI9881_COMMAND(0x11,0x00);
++	ILI9881_COMMAND(0x12,0x00);
++	ILI9881_COMMAND(0x13,0x00);
++	ILI9881_COMMAND(0x14,0x00);
++	ILI9881_COMMAND(0x15,0x00);
++	ILI9881_COMMAND(0x16,0x00);
++	ILI9881_COMMAND(0x17,0x00);
++	ILI9881_COMMAND(0x18,0x00);
++	ILI9881_COMMAND(0x19,0x00);
++	ILI9881_COMMAND(0x1a,0x00);
++	ILI9881_COMMAND(0x1b,0x00);
++	ILI9881_COMMAND(0x1c,0x00);
++	ILI9881_COMMAND(0x1d,0x00);
++	ILI9881_COMMAND(0x1e,0xc0);
++	ILI9881_COMMAND(0x1f,0x00);
++	ILI9881_COMMAND(0x20,0x06);
++	ILI9881_COMMAND(0x21,0x02);
++	ILI9881_COMMAND(0x22,0x00);
++	ILI9881_COMMAND(0x23,0x00);
++	ILI9881_COMMAND(0x24,0x00);
++	ILI9881_COMMAND(0x25,0x00);
++	ILI9881_COMMAND(0x26,0x00);
++	ILI9881_COMMAND(0x27,0x00);
++	ILI9881_COMMAND(0x28,0x33);
++	ILI9881_COMMAND(0x29,0x03);
++	ILI9881_COMMAND(0x2a,0x00);
++	ILI9881_COMMAND(0x2b,0x00);
++	ILI9881_COMMAND(0x2c,0x00);
++	ILI9881_COMMAND(0x2d,0x00);
++	ILI9881_COMMAND(0x2e,0x00);
++	ILI9881_COMMAND(0x2f,0x00);
++	ILI9881_COMMAND(0x30,0x00);
++	ILI9881_COMMAND(0x31,0x00);
++	ILI9881_COMMAND(0x32,0x00);
++	ILI9881_COMMAND(0x33,0x00);
++	ILI9881_COMMAND(0x34,0x04);
++	ILI9881_COMMAND(0x35,0x00);
++	ILI9881_COMMAND(0x36,0x00);
++	ILI9881_COMMAND(0x37,0x00);
++	ILI9881_COMMAND(0x38,0x3C);
++	ILI9881_COMMAND(0x39,0x07);
++	ILI9881_COMMAND(0x3a,0x00);
++	ILI9881_COMMAND(0x3b,0x00);
++	ILI9881_COMMAND(0x3c,0x00);
++
++	ILI9881_COMMAND(0x40,0x03);
++	ILI9881_COMMAND(0x41,0x20);
++	ILI9881_COMMAND(0x42,0x00);
++	ILI9881_COMMAND(0x43,0x00);
++	ILI9881_COMMAND(0x44,0x03);
++	ILI9881_COMMAND(0x45,0x00);
++	ILI9881_COMMAND(0x46,0x01);
++	ILI9881_COMMAND(0x47,0x08);
++	ILI9881_COMMAND(0x48,0x00);
++	ILI9881_COMMAND(0x49,0x00);
++	ILI9881_COMMAND(0x4a,0x00);
++	ILI9881_COMMAND(0x4b,0x00);
++
++	// ==== GL[3OUT=
++	ILI9881_COMMAND(0x4c,0x01);
++	ILI9881_COMMAND(0x4d,0x54);
++	ILI9881_COMMAND(0x4e,0x57);
++	ILI9881_COMMAND(0x4f,0x9b);
++	ILI9881_COMMAND(0x50,0xf9);
++	ILI9881_COMMAND(0x51,0x27);
++	ILI9881_COMMAND(0x52,0x2f);
++	ILI9881_COMMAND(0x53,0xf2);
++	ILI9881_COMMAND(0x54,0xff);
++	ILI9881_COMMAND(0x55,0xff);
++	ILI9881_COMMAND(0x56,0xff);
++
++	// ==== GR[3OUT==
++	ILI9881_COMMAND(0x57,0x01);
++	ILI9881_COMMAND(0x58,0x54);
++	ILI9881_COMMAND(0x59,0x46);
++	ILI9881_COMMAND(0x5a,0x8a);
++	ILI9881_COMMAND(0x5b,0xf8);
++	ILI9881_COMMAND(0x5c,0x26);
++	ILI9881_COMMAND(0x5d,0x2f);
++	ILI9881_COMMAND(0x5e,0xf2);
++	ILI9881_COMMAND(0x5f,0xff);
++	ILI9881_COMMAND(0x60,0xff);
++	ILI9881_COMMAND(0x61,0xff);
++
++	ILI9881_COMMAND(0x62,0x06);
++
++	// == GOUT:4]_BWUTL[5:0]==
++	ILI9881_COMMAND(0x63,0x01);
++	ILI9881_COMMAND(0x64,0x00);
++	ILI9881_COMMAND(0x65,0xa4);
++	ILI9881_COMMAND(0x66,0xa5);
++	ILI9881_COMMAND(0x67,0x58);
++	ILI9881_COMMAND(0x68,0x5a);
++	ILI9881_COMMAND(0x69,0x54);
++	ILI9881_COMMAND(0x6a,0x56);
++	ILI9881_COMMAND(0x6b,0x06);
++	ILI9881_COMMAND(0x6c,0xff);
++	ILI9881_COMMAND(0x6d,0x08);
++	ILI9881_COMMAND(0x6e,0x02);
++	ILI9881_COMMAND(0x6f,0xff);
++	ILI9881_COMMAND(0x70,0x02);
++	ILI9881_COMMAND(0x71,0x02);
++	ILI9881_COMMAND(0x72,0xff);
++	ILI9881_COMMAND(0x73,0xff);
++	ILI9881_COMMAND(0x74,0xff);
++	ILI9881_COMMAND(0x75,0xff);
++	ILI9881_COMMAND(0x76,0xff);
++	ILI9881_COMMAND(0x77,0xff);
++	ILI9881_COMMAND(0x78,0xff);
++
++	// == GOUT:4]_BWUTR[5:0]==
++	ILI9881_COMMAND(0x79,0x01);
++	ILI9881_COMMAND(0x7a,0x00);
++	ILI9881_COMMAND(0x7b,0xa4);
++	ILI9881_COMMAND(0x7c,0xa5);
++	ILI9881_COMMAND(0x7d,0x59);
++	ILI9881_COMMAND(0x7e,0x5b);
++	ILI9881_COMMAND(0x7f,0x55);
++	ILI9881_COMMAND(0x80,0x57);
++	ILI9881_COMMAND(0x81,0x07);
++	ILI9881_COMMAND(0x82,0xff);
++	ILI9881_COMMAND(0x83,0x09);
++	ILI9881_COMMAND(0x84,0x02);
++	ILI9881_COMMAND(0x85,0xff);
++	ILI9881_COMMAND(0x86,0x02);
++	ILI9881_COMMAND(0x87,0x02);
++	ILI9881_COMMAND(0x88,0xff);
++	ILI9881_COMMAND(0x89,0xff);
++	ILI9881_COMMAND(0x8a,0xff);
++	ILI9881_COMMAND(0x8b,0xff);
++	ILI9881_COMMAND(0x8c,0xff);
++	ILI9881_COMMAND(0x8d,0xff);
++	ILI9881_COMMAND(0x8e,0xff);
++
++	ILI9881_COMMAND(0x8f,0x00);
++	ILI9881_COMMAND(0x90,0x00);
++
++	ILI9881_COMMAND(0x9d,0x00);
++	ILI9881_COMMAND(0x9e,0x00);
++
++	ILI9881_COMMAND(0xa0,0x35);
++	ILI9881_COMMAND(0xa1,0x00);
++	ILI9881_COMMAND(0xa2,0x00);
++	ILI9881_COMMAND(0xa3,0x00);
++	ILI9881_COMMAND(0xa4,0x00);
++	ILI9881_COMMAND(0xa5,0x00);
++	ILI9881_COMMAND(0xa6,0x08);
++	ILI9881_COMMAND(0xa7,0x00);
++	ILI9881_COMMAND(0xa8,0x00);
++	ILI9881_COMMAND(0xa9,0x00);
++	ILI9881_COMMAND(0xaa,0x00);
++	ILI9881_COMMAND(0xab,0x00);
++	ILI9881_COMMAND(0xac,0x00);
++	ILI9881_COMMAND(0xad,0x00);
++	ILI9881_COMMAND(0xae,0xff);
++	ILI9881_COMMAND(0xaf,0x00);
++	ILI9881_COMMAND(0xb0,0x00);
++
++	ILI9881_PAGE(0x02);
++	ILI9881_COMMAND(0x08,0x11);
++	ILI9881_COMMAND(0x0a,0x0c);
++	ILI9881_COMMAND(0x0f,0x06);
++	ILI9881_COMMAND(0xA0,0x00,0x26,0x35,0x16,0x19,0x2C,0x1F,0x1F,0x96,0x1C,0x28,0x80,0x1A,0x18,0x4C,0x21,0x27,0x55,0x65,0x39);
++	ILI9881_COMMAND(0xC0,0x00,0x26,0x35,0x16,0x19,0x2C,0x1F,0x1F,0x96,0x1C,0x28,0x80,0x1A,0x18,0x4C,0x21,0x27,0x55,0x65,0x39);
++
++	//===== GIP code finish =====//
++	ILI9881_COMMAND(0x4C,0xA4); // PS_EN on ,0x default :A4
++	ILI9881_COMMAND(0x18,0xF4); // SH on ,0x default E4 
++
++	//=========================//
++	ILI9881_PAGE(0x04);
++	ILI9881_COMMAND(0x5D,0xAF); // VREG1 5.5V 
++	ILI9881_COMMAND(0x5E,0xAF); // VREG2 5.5V
++	ILI9881_COMMAND(0x60,0x9B); // VCM1 
++	ILI9881_COMMAND(0x62,0x9B); // VCM2 
++	ILI9881_COMMAND(0x82,0x38); // VREF_VGH_MOD_CLPSEL 16V 
++	ILI9881_COMMAND(0x84,0x38); // VREF_VGH_DC 16V     
++	ILI9881_COMMAND(0x86,0x18); // VREF_VGL_CLPSEL -10V       
++	ILI9881_COMMAND(0x66,0xC4); // VGH_AC x4 ,0xdefault :04
++	ILI9881_COMMAND(0xC1,0xF0); // VGH_DC x4 ,0xdefault :70
++	ILI9881_COMMAND(0x70,0x60);
++	ILI9881_COMMAND(0x71,0x00);
++
++	//=========================//
++	ILI9881_COMMAND(0x5B,0x33); // vcore_sel Voltage
++	ILI9881_COMMAND(0x6C,0x10); // vcore bias L
++	ILI9881_COMMAND(0x77,0x03); // vcore_sel Voltage
++	ILI9881_COMMAND(0x7B,0x02); // vcore bias R
++
++	//=========================//
++	ILI9881_PAGE(0x01);
++	ILI9881_COMMAND(0xF0,0x00); // 1280 Gate NL
++	ILI9881_COMMAND(0xF1,0xC8); // 1280 Gate NL
++
++	ILI9881_PAGE(0x05);
++	ILI9881_COMMAND(0x22,0x3A); // RGB to BGR
++
++	ILI9881_PAGE(0x00);     
++	ILI9881_COMMAND(0x35,0x00);        
++
++	ILI9881_COMMAND(0x11); // Sleep Out
++	msleep(120);
++	ILI9881_COMMAND(0x29); // Display On
++	msleep(40);
++}
++
++
++
++// Called before enabling the panel
++static int ili9881x_prepare(struct drm_panel *panel)
++{
++	struct mipi_dsi_device *dsi = ili9881x_dsi;
++	int ret;
++
++	if (!dsi) return -ENODEV;
++
++	// Detect panel type by reading ID
++	ret = ili9881_read_id(dsi);
++	if (ret < 0) {
++		pr_err("Failed to read ILI9881 ID\n");
++		return ret;
++	}
++
++	switch (panel_type) {
++	case ILI9881D02:
++		ili9881d02_init(dsi);
++		break;
++	case ILI9881D03:
++		ili9881d03_init(dsi);
++		break;
++	case ILI9881C05:
++		ili9881c05_init(dsi);
++		break;
++	default:
++		pr_warn("Unknown ILI9881 panel type\n");
++		return -ENODEV;
++	}
++
++	return 0;
++}
++
++// Called to turn off the panel
++static int ili9881x_unprepare(struct drm_panel *panel)
++{
++	if (ili9881x_dsi)
++		mipi_dsi_dcs_enter_sleep_mode(ili9881x_dsi);
++	return 0;
++}
++
++static int ili9881x_get_modes(struct drm_panel *panel, struct drm_connector *connector)
++{
++	struct drm_display_mode *mode;
++
++	mode = drm_mode_duplicate(connector->dev, &ili9881x_modes);
++	if (!mode)
++		return -ENOMEM;
++
++	mode->type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED;
++	drm_mode_set_name(mode);
++	connector->display_info.width_mm = mode->width_mm;
++	connector->display_info.height_mm = mode->height_mm;
++	drm_mode_probed_add(connector, mode);
++	drm_connector_set_panel_orientation(connector, DRM_MODE_PANEL_ORIENTATION_RIGHT_UP);
++	return 1;
++}
++
++static const struct drm_panel_funcs ili9881x_funcs = {
++	.get_modes = ili9881x_get_modes,
++	.prepare = ili9881x_prepare,
++	.unprepare = ili9881x_unprepare,
++};
++
++static void ili9881x_set_dsi(struct mipi_dsi_device *dsi)
++{
++	ili9881x_dsi = dsi;
++}
++
++const struct panel_data ili9881x_data = {
++	.set_dsi = ili9881x_set_dsi,
++	.funcs = &ili9881x_funcs,
++};
++
++MODULE_AUTHOR("Zhangqun Ming <north_sea@qq.com>");
++MODULE_AUTHOR("Seeed, Inc.");
++MODULE_DESCRIPTION("MIPI-DSI driver");
++MODULE_LICENSE("GPL v2");
+diff -ruN linux-patched/drivers/gpu/drm/panel/panel-reterminal/README.md linux-custom/drivers/gpu/drm/panel/panel-reterminal/README.md
+--- linux-patched/drivers/gpu/drm/panel/panel-reterminal/README.md	1969-12-31 18:00:00.000000000 -0600
++++ linux-custom/drivers/gpu/drm/panel/panel-reterminal/README.md	2026-01-24 01:05:12.233721941 -0600
+@@ -0,0 +1,103 @@
++# mipi_dsi
++
++### Features
++This is a linux kernel driver for MIPI-DSI panel with touch panel attached to I2C bus.
++
++### How to use
++Add these lines to '/boot/config.txt':
++```
++dtparam=i2c_arm=on
++dtparam=i2c_vc=on
++ignore_lcd=1
++dtoverlay=vc4-kms-v3d-pi4
++dtoverlay=mipi_dsi-i2c10
++```
++
++Get the mipi_dsi source code, and install all linux kernel drivers:
++```bash
++git clone https://github.com/Seeed-Studio/seeed-linux-dtoverlays.git
++git checkout mipi_dsi
++make all_rpi
++sudo make install_rpi
++sudo reboot
++```
++
++You can get these file nodes from sysfs:
++```
++/sys/bus/mipi-dsi/devices/fe700000.dsi.0/
++/dev/input/event0
++```
++
++Change Backlight:
++```
++# use root account
++su root
++# turn off
++echo 0 > /sys/class/backlight/10-0045/brightness
++# Half brightness
++echo 125 > /sys/class/backlight/10-0045/brightness
++# full brightness
++echo 255 > /sys/class/backlight/10-0045/brightness
++# exit root account
++exit
++```
++
++Touchpanel Test:
++```
++$ evtest 
++No device specified, trying to scan all of /dev/input/event*
++Not running as root, no devices may be available.
++Available devices:
++/dev/input/event0:      seeed-tp
++Select the device event number [0-0]: 0
++Input driver version is 1.0.1
++Input device ID: bus 0x18 vendor 0x1234 product 0x1001 version 0x100
++Input device name: "seeed-tp"
++Supported events:
++  Event type 0 (EV_SYN)
++  Event type 1 (EV_KEY)
++    Event code 330 (BTN_TOUCH)
++  Event type 3 (EV_ABS)
++    Event code 0 (ABS_X)
++      Value      0
++      Min        0
++      Max      480
++    Event code 1 (ABS_Y)
++      Value      0
++      Min        0
++      Max      854
++    Event code 47 (ABS_MT_SLOT)
++      Value      0
++      Min        0
++      Max        4
++    Event code 53 (ABS_MT_POSITION_X)
++      Value      0
++      Min        0
++      Max      480
++    Event code 54 (ABS_MT_POSITION_Y)
++      Value      0
++      Min        0
++      Max      854
++    Event code 57 (ABS_MT_TRACKING_ID)
++      Value      0
++      Min        0
++      Max    65535
++Properties:
++  Property type 1 (INPUT_PROP_DIRECT)
++Testing ... (interrupt to exit)
++Event: time 1608004517.527355, type 3 (EV_ABS), code 57 (ABS_MT_TRACKING_ID), value 0
++Event: time 1608004517.527355, type 3 (EV_ABS), code 53 (ABS_MT_POSITION_X), value 223
++Event: time 1608004517.527355, type 3 (EV_ABS), code 54 (ABS_MT_POSITION_Y), value 552
++Event: time 1608004517.527355, type 1 (EV_KEY), code 330 (BTN_TOUCH), value 1
++Event: time 1608004517.527355, type 3 (EV_ABS), code 0 (ABS_X), value 223
++Event: time 1608004517.527355, type 3 (EV_ABS), code 1 (ABS_Y), value 552
++Event: time 1608004517.527355, -------------- SYN_REPORT ------------
++Event: time 1608004517.557357, type 3 (EV_ABS), code 54 (ABS_MT_POSITION_Y), value 551
++Event: time 1608004517.557357, type 3 (EV_ABS), code 1 (ABS_Y), value 551
++Event: time 1608004517.557357, -------------- SYN_REPORT ------------
++Event: time 1608004517.685891, type 3 (EV_ABS), code 57 (ABS_MT_TRACKING_ID), value -1
++Event: time 1608004517.685891, type 1 (EV_KEY), code 330 (BTN_TOUCH), value 0
++Event: time 1608004517.685891, -------------- SYN_REPORT ------------
++```
++
++Enjoy !
+diff -ruN linux-patched/drivers/gpu/drm/panel/panel-reterminal/touch_panel.c linux-custom/drivers/gpu/drm/panel/panel-reterminal/touch_panel.c
+--- linux-patched/drivers/gpu/drm/panel/panel-reterminal/touch_panel.c	1969-12-31 18:00:00.000000000 -0600
++++ linux-custom/drivers/gpu/drm/panel/panel-reterminal/touch_panel.c	2026-01-24 01:05:12.233721941 -0600
+@@ -0,0 +1,195 @@
++#include "mipi_dsi.h"
++
++
++#define GOODIX_STATUS_SIZE		        2
++#define GOODIX_CONTACT_SIZE		        8
++#define GOODIX_BUFFER_STATUS_READY	    (((uint32_t)0x01)<<7)//BIT(7)
++#define GOODIX_HAVE_KEY			        (((uint32_t)0x01)<<4)//BIT(4)
++
++#define TP_DEFAULT_WIDTH	1280
++#define TP_DEFAULT_HEIGHT	720
++#define TP_MAX_POINTS       5
++#define TP_POLL_INTERVAL    15
++
++
++static int goodix_ts_read_input_report(struct i2c_mipi_dsi *md, u8 *data)
++{
++	int header = GOODIX_STATUS_SIZE + GOODIX_CONTACT_SIZE;
++	int i, ret, touch_num;
++
++	for (i=0; i<2; i++) {
++		ret = i2c_md_read(md, REG_TP_STATUS, data, header);
++		if (ret < 0) {
++			return -EIO;
++		}
++
++		if (data[0] & GOODIX_BUFFER_STATUS_READY) {
++			touch_num = data[0] & 0x0f;
++			if (touch_num > TP_MAX_POINTS)
++				return -EPROTO;
++
++			if (touch_num > 1) {
++				ret = i2c_md_read(md, REG_TP_POINT, data+header, (touch_num-1)*GOODIX_CONTACT_SIZE);
++				if (ret < 0)
++					return -EIO;
++			}
++			return touch_num;
++		}
++
++		usleep_range(3000, 5000); /* Poll every 3 - 5 ms */
++	}
++
++	/*
++	 * The Goodix panel will send spurious interrupts after a
++	 * 'finger up' event, which will always cause a timeout.
++	 */
++	return -ENOMSG;
++}
++
++//TODO
++//need more work for it's compatibility
++static void x_y_rotate(int *x, int *y)
++{
++        int temp_x,temp_y;
++        int temp;
++
++        if(*x < 0 || *y < 0) {
++		printk(KERN_ERR"%s<%d> parameter error\n", __func__, __LINE__);
++                return ;
++	}
++        //1 move rectangle center to (0,0)
++        temp_x = *x - TP_DEFAULT_WIDTH/2;
++        temp_y = *y - TP_DEFAULT_HEIGHT/2;
++
++        //2 rotate the point anti-clockwise for 90 degree
++        temp = temp_x;
++        temp_x = temp_y;
++        temp_y = temp;
++
++        temp_x *= (-1);
++        temp_y *= 1;
++
++        //3 zoom
++        temp_x = temp_x * TP_DEFAULT_WIDTH / TP_DEFAULT_HEIGHT;
++        temp_y = temp_y * TP_DEFAULT_HEIGHT / TP_DEFAULT_WIDTH;
++
++        //4 move rectangle center back to (TP_DEFAULT_WIDTH/2, TP_DEFAULT_HEIGHT/2)
++        temp_x += TP_DEFAULT_WIDTH/2;
++        temp_y += TP_DEFAULT_HEIGHT/2;
++
++        *x = temp_x;
++        *y = temp_y;
++}
++
++static void goodix_ts_report_touch_8b(struct i2c_mipi_dsi *md, u8 *coor_data)
++{
++	struct input_dev *input_dev = md->input;
++	int id = coor_data[7];
++	int input_x = 0;
++	int input_y = 0;
++	int input_w = coor_data[4];
++
++	input_x = coor_data[1];
++	input_x <<= 8;
++	input_x += coor_data[0];
++	
++	input_y = coor_data[3];
++	input_y <<= 8;
++	input_y += coor_data[2];
++
++	if(md->tp_point_rotate)
++		x_y_rotate(&input_x, &input_y);
++
++	input_mt_slot(input_dev, id);
++	input_mt_report_slot_state(input_dev, MT_TOOL_FINGER, true);
++	touchscreen_report_pos(input_dev, &md->prop, input_x, input_y, true);
++	input_report_abs(input_dev, ABS_MT_TOUCH_MAJOR, input_w);
++	input_report_abs(input_dev, ABS_MT_WIDTH_MAJOR, input_w);
++}
++
++static void tp_poll_func(struct input_dev *input)
++{
++	struct i2c_mipi_dsi *md = (struct i2c_mipi_dsi *)input_get_drvdata(input);
++	u8  point_data[GOODIX_STATUS_SIZE + TP_MAX_POINTS * GOODIX_CONTACT_SIZE] = { 0 };
++	int touch_num;
++	int i;
++
++	touch_num = goodix_ts_read_input_report(md, point_data);
++	if (touch_num < 0) {
++		return;
++	}
++
++	for (i = 0; i < touch_num; i++) {
++		goodix_ts_report_touch_8b(md, &point_data[GOODIX_STATUS_SIZE + i*GOODIX_CONTACT_SIZE]);
++	}
++
++	input_mt_sync_frame(input);
++	input_sync(input);
++}
++
++int tp_init(struct i2c_mipi_dsi *md)
++{
++	struct i2c_client *i2c = md->i2c;
++	struct device *dev = &i2c->dev;
++	struct input_dev *input;
++	int ret;
++
++	input = devm_input_allocate_device(dev);
++	if (!input) {
++		dev_err(dev, "Failed to allocate input device\n");
++		return -ENOMEM;
++	}
++	md->input = input;
++	input_set_drvdata(input, md);
++
++	input->dev.parent = dev;
++	input->name = "seeed-tp";
++	input->id.bustype = BUS_I2C;
++	input->id.vendor = 0x1234;
++	input->id.product = 0x1001;
++	input->id.version = 0x0100;
++
++	input_set_abs_params(input, ABS_MT_WIDTH_MAJOR, 0, 255, 0, 0);
++	input_set_abs_params(input, ABS_MT_TOUCH_MAJOR, 0, 255, 0, 0);
++	input_set_abs_params(input, ABS_MT_POSITION_X, 0, TP_DEFAULT_WIDTH, 0, 0);
++	input_set_abs_params(input, ABS_MT_POSITION_Y, 0, TP_DEFAULT_HEIGHT, 0, 0);
++	//touchscreen_parse_properties(input, true, &md->prop);
++ #if 0
++	md->prop.max_x = 1024;//TP_DEFAULT_WIDTH;
++	md->prop.max_y = 768;//TP_DEFAULT_HEIGHT;
++	md->prop.invert_x = 0;
++	md->prop.invert_y = 1;
++	md->prop.swap_x_y = 1;
++#endif
++	ret = input_mt_init_slots(input, TP_MAX_POINTS, INPUT_MT_DIRECT | INPUT_MT_DROP_UNUSED);
++	if (ret) {
++		dev_err(dev, "could not init mt slots, %d\n", ret);
++		return ret;
++	}
++
++	ret = input_setup_polling(input, tp_poll_func);
++	if (ret) {
++		dev_err(dev, "could not set up polling mode, %d\n", ret);
++		return ret;
++	}
++	input_set_poll_interval(input, TP_POLL_INTERVAL);
++
++	ret = input_register_device(input);
++	if (ret) {
++		dev_err(dev, "could not register input device, %d\n", ret);
++		return ret;
++	}
++
++	return 0;
++}
++
++int tp_deinit(struct i2c_mipi_dsi *md)
++{
++	input_unregister_device(md->input);
++	return 0;
++}
++
++MODULE_AUTHOR("Zhangqun Ming <north_sea@qq.com>");
++MODULE_AUTHOR("Seeed, Inc.");
++MODULE_DESCRIPTION("MIPI-DSI driver");
++MODULE_LICENSE("GPL v2");
