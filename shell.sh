@@ -26,8 +26,9 @@ case "$1" in
         [ -d $dir ] || echo $dir not found
         [ -d $dir ] || continue
         [ -f $dir/.yeico_patched ] || echo Patching: $dir
+        [ -f $dir/.yeico_patched ] || make $package-dirclean
+        [ -f $dir/.yeico_patched ] || make $package-patch
         [ -f $dir/.yeico_patched ] || (cd build/$package-$version && (patch -p1 < $p))
-        [ -f $dir/.yeico_patched ] || make $package-rebuild
         [ -f $dir/.yeico_patched ] || counter=$((counter + 1))
         [ -f $dir/.yeico_patched ] || touch $dir/.yeico_patched
     done

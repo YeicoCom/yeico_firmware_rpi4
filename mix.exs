@@ -103,6 +103,8 @@ defmodule NervesSystemRpi4.MixProject do
 
   defp package_files do
     [
+      "patches/*.patch",
+      "linux/*.patch",
       "fwup_include",
       "rootfs_overlay",
       "CHANGELOG.md",
