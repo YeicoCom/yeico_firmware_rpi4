@@ -7,7 +7,9 @@ Type `exit` to exit the screen session.
 ```bash
 ./shell.sh
 
-make cog-rebuild
+make <package>-dirclean
+make <package>-patch
+make <package>-rebuild
 
 make linux-menuconfig
 make linux-update-defconfig

@@ -9,7 +9,10 @@ case "$1" in
     cd .nerves/artifacts/yeico_firmware_rpi4-portable-1.32.0
     echo Running within an screen session
     $SELF patch | tee ${SELF%.*}.log
-    bash
+    [ $# -gt 0 ] && shift
+    [ $# -gt 0 ] && echo Executing: "$@"
+    [ $# -gt 0 ] && bash -c "$@"
+    [ $# -gt 0 ] || bash
     ;;
     patch)
     counter=0
@@ -22,7 +25,7 @@ case "$1" in
         [ -d $dir ] || make $package-patch
         [ -d $dir ] || echo $dir not found
         [ -d $dir ] || continue
-        [ -f $dir/.yeico_patched ] || echo $dir
+        [ -f $dir/.yeico_patched ] || echo Patching: $dir
         [ -f $dir/.yeico_patched ] || (cd build/$package-$version && (patch -p1 < $p))
         [ -f $dir/.yeico_patched ] || make $package-rebuild
         [ -f $dir/.yeico_patched ] || counter=$((counter + 1))
@@ -34,6 +37,6 @@ case "$1" in
     *)
     cd $(dirname $SELF)
     mix deps.get
-    screen $SELF setup
+    screen $SELF setup $@
     ;;
 esac
