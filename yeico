@@ -1,12 +1,28 @@
 #!/bin/bash
 
 SELF=$(realpath $0)
+DIR=$(dirname $SELF)
+TARGET=$(cat $DIR/yeico.target)
 
 case "$1" in
+    clean)
+    cd $(dirname $SELF)
+    rm -fr ~/.nerves/artifacts/yeico_firmware_$TARGET-*
+    rm -fr deps _build .nerves
+    ;;
+    artifact)
+    cd $(dirname $SELF)
+    mix deps.get
+    $SELF make
+    mix nerves.artifact
+    ls -l yeico_firmware_$TARGET-*.tar.gz
+    mv yeico_firmware_$TARGET-*.tar.gz ~/.nerves/dl
+    ls -l ~/.nerves/dl/yeico_firmware_$TARGET-*.tar.gz
+    ;;
     setup)
     cd $(dirname $SELF)
-    deps/nerves_system_br/create-build.sh nerves_defconfig .nerves/artifacts/yeico_firmware_rpi4-portable-1.32.0
-    cd .nerves/artifacts/yeico_firmware_rpi4-portable-1.32.0
+    deps/nerves_system_br/create-build.sh nerves_defconfig .nerves/artifacts/yeico_firmware_$TARGET-portable-1.32.0
+    cd .nerves/artifacts/yeico_firmware_$TARGET-portable-1.32.0
     echo Running within an screen session
     $SELF patch | tee ${SELF%.*}.log
     [ $# -gt 0 ] && shift
@@ -26,18 +42,15 @@ case "$1" in
         [ -d $dir ] || echo $dir not found
         [ -d $dir ] || continue
         [ -f $dir/.yeico_patched ] || echo Patching: $dir
-        [ -f $dir/.yeico_patched ] || make $package-dirclean
-        [ -f $dir/.yeico_patched ] || make $package-patch
         [ -f $dir/.yeico_patched ] || (cd build/$package-$version && (patch -p1 < $p))
         [ -f $dir/.yeico_patched ] || counter=$((counter + 1))
         [ -f $dir/.yeico_patched ] || touch $dir/.yeico_patched
     done
     echo Total patched: $counter
-    [ $counter -gt 0 ] && make
     ;;
     *)
     cd $(dirname $SELF)
     mix deps.get
-    screen $SELF setup $@
+    screen $SELF setup "$@"
     ;;
 esac

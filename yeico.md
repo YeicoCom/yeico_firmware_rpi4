@@ -5,7 +5,7 @@ This script enters the nerves shell applying patches along the way.
 Type `exit` to exit the screen session.
 
 ```bash
-./shell.sh
+./yeico
 
 make <package>-dirclean
 make <package>-patch
